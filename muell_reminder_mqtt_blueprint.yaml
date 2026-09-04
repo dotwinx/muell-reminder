@@ -1,0 +1,114 @@
+blueprint:
+  name: Müll-Reminder – MQTT Publish (WCS direkt)
+  description: >
+    Veröffentlicht die "Tage bis Abholung"-Werte direkt aus vier bestehenden
+    "Waste Collection Schedule"-Sensoren auf die MQTT-Topics des
+    Müll-Reminder-Geräts (muell/rest, muell/bio, muell/papier, muell/gelb).
+    Keine eigenen Tage-Sensoren nötig - liest das von WCS bereitgestellte
+    "daysTo"-Attribut direkt aus. Voraussetzung: Bei den WCS-Sensoren muss
+    die Option "add_days_to" aktiviert sein, sonst ist kein daysTo-Attribut
+    vorhanden. Fehlt das Attribut, wird keine MQTT-Nachricht gesendet und
+    eine dauerhafte Benachrichtigung in Home Assistant erzeugt.
+  domain: automation
+  input:
+    sensor_rest:
+      name: Restmüll-Sensor (Waste Collection Schedule)
+      description: Der rohe WCS-Sensor für Restmüll, kein eigener Tage-Sensor nötig.
+      selector:
+        entity:
+          domain: sensor
+    sensor_bio:
+      name: Biomüll-Sensor (Waste Collection Schedule)
+      selector:
+        entity:
+          domain: sensor
+    sensor_papier:
+      name: Papier-Sensor (Waste Collection Schedule)
+      selector:
+        entity:
+          domain: sensor
+    sensor_gelb:
+      name: Gelber-Sack-Sensor (Waste Collection Schedule)
+      selector:
+        entity:
+          domain: sensor
+    publish_time:
+      name: Tägliche Auffrisch-Uhrzeit
+      description: >
+        Zusätzlich zu jeder Sensoränderung wird täglich zu dieser Uhrzeit
+        erneut veröffentlicht - hält die MQTT-Werte frisch, falls der Broker
+        seine retained Nachrichten mal verliert (z. B. nach einem Neustart
+        ohne Persistenz).
+      default: "06:00:00"
+      selector:
+        time: {}
+
+variables:
+  sensor_rest: !input sensor_rest
+  sensor_bio: !input sensor_bio
+  sensor_papier: !input sensor_papier
+  sensor_gelb: !input sensor_gelb
+
+trigger:
+  - platform: state
+    entity_id: !input sensor_rest
+  - platform: state
+    entity_id: !input sensor_bio
+  - platform: state
+    entity_id: !input sensor_papier
+  - platform: state
+    entity_id: !input sensor_gelb
+  - platform: time
+    at: !input publish_time
+  - platform: homeassistant
+    event: start
+
+action:
+  - variables:
+      missing_days_to: >
+        {{ [
+          sensor_rest if state_attr(sensor_rest, 'daysTo') is none else none,
+          sensor_bio if state_attr(sensor_bio, 'daysTo') is none else none,
+          sensor_papier if state_attr(sensor_papier, 'daysTo') is none else none,
+          sensor_gelb if state_attr(sensor_gelb, 'daysTo') is none else none
+        ] | reject('equalto', none) | list }}
+
+  - if:
+      - condition: template
+        value_template: "{{ missing_days_to | count > 0 }}"
+    then:
+      - service: persistent_notification.create
+        data:
+          title: "Müll-Reminder: WCS-Konfiguration prüfen"
+          message: >
+            Bei folgenden WCS-Sensoren fehlt das Attribut "daysTo":
+            {{ missing_days_to | join(', ') }}.
+            Bitte in Waste Collection Schedule die Option "add_days_to"
+            aktivieren. Die MQTT-Veröffentlichung wurde abgebrochen.
+      - stop: "MQTT-Veröffentlichung abgebrochen: daysTo fehlt."
+
+  - service: mqtt.publish
+    data:
+      topic: muell/rest
+      retain: true
+      payload: "{{ state_attr(sensor_rest, 'daysTo') }}"
+
+  - service: mqtt.publish
+    data:
+      topic: muell/bio
+      retain: true
+      payload: "{{ state_attr(sensor_bio, 'daysTo') }}"
+
+  - service: mqtt.publish
+    data:
+      topic: muell/papier
+      retain: true
+      payload: "{{ state_attr(sensor_papier, 'daysTo') }}"
+
+  - service: mqtt.publish
+    data:
+      topic: muell/gelb
+      retain: true
+      payload: "{{ state_attr(sensor_gelb, 'daysTo') }}"
+
+mode: single
