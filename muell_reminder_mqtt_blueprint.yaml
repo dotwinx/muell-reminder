@@ -7,8 +7,11 @@ blueprint:
     Keine eigenen Tage-Sensoren nötig - liest das von WCS bereitgestellte
     "daysTo"-Attribut direkt aus. Voraussetzung: Bei den WCS-Sensoren muss
     die Option "add_days_to" aktiviert sein, sonst ist kein daysTo-Attribut
-    vorhanden. Fehlt das Attribut, wird keine MQTT-Nachricht gesendet und
-    eine dauerhafte Benachrichtigung in Home Assistant erzeugt.
+    vorhanden. Fehlt das Attribut bei mindestens einem der vier Sensoren,
+    wird KEINE MQTT-Nachricht gesendet (alle vier oder keiner) und eine
+    persistente Benachrichtigung in Home Assistant erzeugt (wird bei
+    erneutem Auftreten aktualisiert statt vervielfacht, und automatisch
+    entfernt, sobald wieder alle vier Sensoren das Attribut liefern).
   domain: automation
   input:
     sensor_rest:
@@ -79,6 +82,7 @@ action:
     then:
       - service: persistent_notification.create
         data:
+          notification_id: "muell_reminder_daysto_missing"
           title: "Müll-Reminder: WCS-Konfiguration prüfen"
           message: >
             Bei folgenden WCS-Sensoren fehlt das Attribut "daysTo":
@@ -86,6 +90,10 @@ action:
             Bitte in Waste Collection Schedule die Option "add_days_to"
             aktivieren. Die MQTT-Veröffentlichung wurde abgebrochen.
       - stop: "MQTT-Veröffentlichung abgebrochen: daysTo fehlt."
+
+  - service: persistent_notification.dismiss
+    data:
+      notification_id: "muell_reminder_daysto_missing"
 
   - service: mqtt.publish
     data:
