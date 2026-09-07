@@ -1,228 +1,114 @@
 blueprint:
-  name: Müll-Reminder – MQTT Publish (WCS Kalender)
+  name: Müll-Reminder – MQTT Publish (WCS direkt)
   description: >
-    Ermittelt die nächsten Abholtage für Restmüll, Biomüll, Papier und
-    Gelben Sack aus frei wählbaren Waste-Collection-Schedule-Kalendern
-    und veröffentlicht die Anzahl der Tage bis zur nächsten Abholung
-    per MQTT. Ein Kalender kann für mehrere Müllarten verwendet werden.
+    Veröffentlicht die "Tage bis Abholung"-Werte direkt aus vier bestehenden
+    "Waste Collection Schedule"-Sensoren auf die MQTT-Topics des
+    Müll-Reminder-Geräts (muell/rest, muell/bio, muell/papier, muell/gelb).
+    Keine eigenen Tage-Sensoren nötig - liest das von WCS bereitgestellte
+    "daysTo"-Attribut direkt aus. Voraussetzung: Bei den WCS-Sensoren muss
+    die Option "add_days_to" aktiviert sein, sonst ist kein daysTo-Attribut
+    vorhanden. Fehlt das Attribut, wird keine MQTT-Nachricht gesendet und
+    eine dauerhafte Benachrichtigung in Home Assistant erzeugt.
   domain: automation
-  homeassistant:
-    min_version: "2024.6.0"
-
   input:
-
-    rest_calendar:
-      name: Restmüll-Kalender
-      description: >
-        WCS-Kalender für Restmüll. Darf auch ein gemeinsamer
-        Kalender mit mehreren Müllarten sein.
+    sensor_rest:
+      name: Restmüll-Sensor (Waste Collection Schedule)
+      description: Der rohe WCS-Sensor für Restmüll, kein eigener Tage-Sensor nötig.
       selector:
         entity:
-          filter:
-            - domain: calendar
-
-    bio_calendar:
-      name: Biomüll-Kalender
-      description: >
-        WCS-Kalender für Biomüll. Darf auch ein gemeinsamer
-        Kalender mit mehreren Müllarten sein.
+          domain: sensor
+    sensor_bio:
+      name: Biomüll-Sensor (Waste Collection Schedule)
       selector:
         entity:
-          filter:
-            - domain: calendar
-
-    paper_calendar:
-      name: Papier-Kalender
-      description: >
-        WCS-Kalender für Papier. Darf auch ein gemeinsamer
-        Kalender mit mehreren Müllarten sein.
+          domain: sensor
+    sensor_papier:
+      name: Papier-Sensor (Waste Collection Schedule)
       selector:
         entity:
-          filter:
-            - domain: calendar
-
-    yellow_calendar:
-      name: Gelber-Sack-Kalender
-      description: >
-        WCS-Kalender für Gelben Sack / Verpackungen. Darf auch
-        ein gemeinsamer Kalender mit mehreren Müllarten sein.
+          domain: sensor
+    sensor_gelb:
+      name: Gelber-Sack-Sensor (Waste Collection Schedule)
       selector:
         entity:
-          filter:
-            - domain: calendar
-
-    update_time:
-      name: Tägliche Aktualisierung
-      description: Uhrzeit, zu der die vier Werte neu ermittelt und per MQTT veröffentlicht werden.
-      default: "20:00:00"
+          domain: sensor
+    publish_time:
+      name: Tägliche Auffrisch-Uhrzeit
+      description: >
+        Zusätzlich zu jeder Sensoränderung wird täglich zu dieser Uhrzeit
+        erneut veröffentlicht - hält die MQTT-Werte frisch, falls der Broker
+        seine retained Nachrichten mal verliert (z. B. nach einem Neustart
+        ohne Persistenz).
+      default: "06:00:00"
       selector:
-        time:
+        time: {}
 
-triggers:
-  - trigger: time
-    at: !input update_time
+variables:
+  sensor_rest: !input sensor_rest
+  sensor_bio: !input sensor_bio
+  sensor_papier: !input sensor_papier
+  sensor_gelb: !input sensor_gelb
 
-actions:
+trigger:
+  - platform: state
+    entity_id: !input sensor_rest
+  - platform: state
+    entity_id: !input sensor_bio
+  - platform: state
+    entity_id: !input sensor_papier
+  - platform: state
+    entity_id: !input sensor_gelb
+  - platform: time
+    at: !input publish_time
+  - platform: homeassistant
+    event: start
 
-  # Alle vier Kalender abfragen.
-  # Mehrfach ausgewählte Kalender werden von Home Assistant
-  # nur einmal zurückgeliefert.
-  - action: calendar.get_events
-    target:
-      entity_id:
-        - !input rest_calendar
-        - !input bio_calendar
-        - !input paper_calendar
-        - !input yellow_calendar
-    data:
-      start_date_time: "{{ today_at() }}"
-      duration:
-        days: 370
-    response_variable: wcs_events
-
-  # RESTMÜLL
+action:
   - variables:
-      rest_days: >-
-        {% set ns = namespace(events=[]) %}
+      missing_days_to: >
+        {{ [
+          sensor_rest if state_attr(sensor_rest, 'daysTo') is none else none,
+          sensor_bio if state_attr(sensor_bio, 'daysTo') is none else none,
+          sensor_papier if state_attr(sensor_papier, 'daysTo') is none else none,
+          sensor_gelb if state_attr(sensor_gelb, 'daysTo') is none else none
+        ] | reject('equalto', none) | list }}
 
-        {% for calendar in wcs_events.values() %}
-          {% for event in calendar.events %}
-            {% set summary = event.summary | default('') | lower %}
+  - if:
+      - condition: template
+        value_template: "{{ missing_days_to | count > 0 }}"
+    then:
+      - service: persistent_notification.create
+        data:
+          title: "Müll-Reminder: WCS-Konfiguration prüfen"
+          message: >
+            Bei folgenden WCS-Sensoren fehlt das Attribut "daysTo":
+            {{ missing_days_to | join(', ') }}.
+            Bitte in Waste Collection Schedule die Option "add_days_to"
+            aktivieren. Die MQTT-Veröffentlichung wurde abgebrochen.
+      - stop: "MQTT-Veröffentlichung abgebrochen: daysTo fehlt."
 
-            {% if
-              'restmüll' in summary
-              or 'restmuell' in summary
-              or 'restabfall' in summary
-            %}
-              {% set ns.events = ns.events + [event] %}
-            {% endif %}
-          {% endfor %}
-        {% endfor %}
-
-        {% set events = ns.events
-          | sort(attribute='start')
-          | list %}
-
-        {% if events | length > 0 %}
-          {% set date = as_datetime(events[0].start) | as_local | as_datetime %}
-          {{ (date.date() - now().date()).days }}
-        {% else %}
-          0
-        {% endif %}
-
-  # BIOMÜLL
-  - variables:
-      bio_days: >-
-        {% set ns = namespace(events=[]) %}
-
-        {% for calendar in wcs_events.values() %}
-          {% for event in calendar.events %}
-            {% set summary = event.summary | default('') | lower %}
-
-            {% if
-              'biomüll' in summary
-              or 'biomuell' in summary
-              or 'biotonne' in summary
-            %}
-              {% set ns.events = ns.events + [event] %}
-            {% endif %}
-          {% endfor %}
-        {% endfor %}
-
-        {% set events = ns.events
-          | sort(attribute='start')
-          | list %}
-
-        {% if events | length > 0 %}
-          {% set date = as_datetime(events[0].start) | as_local | as_datetime %}
-          {{ (date.date() - now().date()).days }}
-        {% else %}
-          0
-        {% endif %}
-
-  # PAPIER
-  - variables:
-      paper_days: >-
-        {% set ns = namespace(events=[]) %}
-
-        {% for calendar in wcs_events.values() %}
-          {% for event in calendar.events %}
-            {% set summary = event.summary | default('') | lower %}
-
-            {% if
-              'papier' in summary
-              or 'papiertonne' in summary
-              or 'altpapier' in summary
-            %}
-              {% set ns.events = ns.events + [event] %}
-            {% endif %}
-          {% endfor %}
-        {% endfor %}
-
-        {% set events = ns.events
-          | sort(attribute='start')
-          | list %}
-
-        {% if events | length > 0 %}
-          {% set date = as_datetime(events[0].start) | as_local | as_datetime %}
-          {{ (date.date() - now().date()).days }}
-        {% else %}
-          0
-        {% endif %}
-
-  # GELBER SACK / VERPACKUNGEN
-  - variables:
-      yellow_days: >-
-        {% set ns = namespace(events=[]) %}
-
-        {% for calendar in wcs_events.values() %}
-          {% for event in calendar.events %}
-            {% set summary = event.summary | default('') | lower %}
-
-            {% if
-              'gelb' in summary
-              or 'verpack' in summary
-              or 'wertstoff' in summary
-            %}
-              {% set ns.events = ns.events + [event] %}
-            {% endif %}
-          {% endfor %}
-        {% endfor %}
-
-        {% set events = ns.events
-          | sort(attribute='start')
-          | list %}
-
-        {% if events | length > 0 %}
-          {% set date = as_datetime(events[0].start) | as_local | as_datetime %}
-          {{ (date.date() - now().date()).days }}
-        {% else %}
-          0
-        {% endif %}
-
-  # MQTT
-  - action: mqtt.publish
+  - service: mqtt.publish
     data:
       topic: muell/rest
-      payload: "{{ rest_days | int }}"
       retain: true
+      payload: "{{ state_attr(sensor_rest, 'daysTo') }}"
 
-  - action: mqtt.publish
+  - service: mqtt.publish
     data:
       topic: muell/bio
-      payload: "{{ bio_days | int }}"
       retain: true
+      payload: "{{ state_attr(sensor_bio, 'daysTo') }}"
 
-  - action: mqtt.publish
+  - service: mqtt.publish
     data:
       topic: muell/papier
-      payload: "{{ paper_days | int }}"
       retain: true
+      payload: "{{ state_attr(sensor_papier, 'daysTo') }}"
 
-  - action: mqtt.publish
+  - service: mqtt.publish
     data:
       topic: muell/gelb
-      payload: "{{ yellow_days | int }}"
       retain: true
+      payload: "{{ state_attr(sensor_gelb, 'daysTo') }}"
 
 mode: single
