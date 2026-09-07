@@ -1,91 +1,99 @@
 blueprint:
   name: Müll-Reminder – MQTT Publish (WCS Sensoren)
   description: >
-    Überträgt die Tage bis zur nächsten Müllabholung aus vier
-    Waste-Collection-Schedule-Sensoren per MQTT an den Müll-Reminder.
-    Für jede Müllart wird ein WCS-Sensor ausgewählt. Der Blueprint
-    liest ausschließlich das daysTo-Attribut des jeweiligen Sensors.
+    Veröffentlicht die Anzahl der Tage bis zur nächsten Müllabholung
+    direkt aus den ausgewählten Waste-Collection-Schedule-Sensoren per MQTT.
+    Jeder Sensor entspricht genau einem Mülltyp. Nicht benötigte Müllarten
+    können leer gelassen werden.
   domain: automation
 
   input:
 
     rest_sensor:
       name: Restmüll-Sensor
-      description: WCS-Sensor für Restabfall
+      description: Sensor für Restmüll. Optional.
+      default: ""
       selector:
         entity:
-          filter:
-            - integration: waste_collection_schedule
-              domain: sensor
+          domain: sensor
 
     bio_sensor:
       name: Biomüll-Sensor
-      description: WCS-Sensor für Bioabfall
+      description: Sensor für Biomüll. Optional.
+      default: ""
       selector:
         entity:
-          filter:
-            - integration: waste_collection_schedule
-              domain: sensor
+          domain: sensor
 
-    paper_sensor:
+    papier_sensor:
       name: Papier-Sensor
-      description: WCS-Sensor für Papier
+      description: Sensor für Papier. Optional.
+      default: ""
       selector:
         entity:
-          filter:
-            - integration: waste_collection_schedule
-              domain: sensor
+          domain: sensor
 
-    yellow_sensor:
-      name: Verpackungs-Sensor
-      description: WCS-Sensor für Leichtverpackungen / Gelben Sack
+    gelb_sensor:
+      name: Verpackungs-/Gelber-Sack-Sensor
+      description: Sensor für Leichtverpackungen / Gelben Sack. Optional.
+      default: ""
       selector:
         entity:
-          filter:
-            - integration: waste_collection_schedule
-              domain: sensor
+          domain: sensor
 
     update_time:
       name: Tägliche Aktualisierung
-      description: Zu dieser Uhrzeit werden die vier Werte per MQTT veröffentlicht.
+      description: Zu dieser Uhrzeit werden die ausgewählten Werte per MQTT veröffentlicht.
       default: "20:00:00"
       selector:
-        time:
+        time: {}
 
-triggers:
-  - trigger: time
+trigger:
+  - platform: time
     at: !input update_time
 
-actions:
+variables:
+  rest_sensor: !input rest_sensor
+  bio_sensor: !input bio_sensor
+  papier_sensor: !input papier_sensor
+  gelb_sensor: !input gelb_sensor
 
-  - variables:
-      rest_sensor: !input rest_sensor
-      bio_sensor: !input bio_sensor
-      paper_sensor: !input paper_sensor
-      yellow_sensor: !input yellow_sensor
+action:
 
-  - action: mqtt.publish
-    data:
-      topic: muell/rest
-      payload: "{{ state_attr(rest_sensor, 'daysTo') | int(0) }}"
-      retain: true
+  - if:
+      - condition: template
+        value_template: "{{ rest_sensor != '' }}"
+    then:
+      - service: mqtt.publish
+        data:
+          topic: muell/rest
+          payload: "{{ state_attr(rest_sensor, 'daysTo') | int }}"
 
-  - action: mqtt.publish
-    data:
-      topic: muell/bio
-      payload: "{{ state_attr(bio_sensor, 'daysTo') | int(0) }}"
-      retain: true
+  - if:
+      - condition: template
+        value_template: "{{ bio_sensor != '' }}"
+    then:
+      - service: mqtt.publish
+        data:
+          topic: muell/bio
+          payload: "{{ state_attr(bio_sensor, 'daysTo') | int }}"
 
-  - action: mqtt.publish
-    data:
-      topic: muell/papier
-      payload: "{{ state_attr(paper_sensor, 'daysTo') | int(0) }}"
-      retain: true
+  - if:
+      - condition: template
+        value_template: "{{ papier_sensor != '' }}"
+    then:
+      - service: mqtt.publish
+        data:
+          topic: muell/papier
+          payload: "{{ state_attr(papier_sensor, 'daysTo') | int }}"
 
-  - action: mqtt.publish
-    data:
-      topic: muell/gelb
-      payload: "{{ state_attr(yellow_sensor, 'daysTo') | int(0) }}"
-      retain: true
+  - if:
+      - condition: template
+        value_template: "{{ gelb_sensor != '' }}"
+    then:
+      - service: mqtt.publish
+        data:
+          topic: muell/gelb
+          payload: "{{ state_attr(gelb_sensor, 'daysTo') | int }}"
 
 mode: single
