@@ -1,126 +1,206 @@
 blueprint:
-  name: Müll-Reminder – MQTT Publish (WCS Kalender direkt)
+  name: "Müll-Reminder – MQTT Publish (WCS Kalender)"
   description: >
-    Veröffentlicht die Anzahl der Tage bis zur nächsten Abholung direkt aus
-    vier Waste-Collection-Schedule-Kalendern per MQTT.
-    Die Berechnung erfolgt anhand des start_time-Attributs des jeweiligen
-    WCS-Kalenders. Es werden keine zusätzlichen Template-Sensoren und kein
-    daysTo-Attribut benötigt.
+    Ermittelt die nächsten Abholtage aus zwei Waste-Collection-Schedule-
+    Kalendern und veröffentlicht sie per MQTT.
+    
+    Restmüll wird aus dem separaten Restmüll-Kalender gelesen.
+    Biomüll, Papier und Verpackungen werden aus dem gemeinsamen
+    "Alle"-Kalender anhand des Veranstaltungstitels herausgefiltert.
+    
+    Es werden keine zusätzlichen Template-Sensoren und kein days_to-
+    Attribut benötigt.
   domain: automation
+  author: "NeMPS"
 
   input:
-    calendar_rest:
+
+    rest_calendar:
       name: Restmüll-Kalender
-      description: WCS-Kalender für Restmüll
+      description: WCS-Kalender, der ausschließlich Restmüll enthält.
       selector:
         entity:
-          domain: calendar
+          filter:
+            - domain: calendar
 
-    calendar_bio:
-      name: Biomüll-Kalender
-      description: WCS-Kalender für Biomüll
-      selector:
-        entity:
-          domain: calendar
-
-    calendar_papier:
-      name: Papier-Kalender
-      description: WCS-Kalender für Papier
-      selector:
-        entity:
-          domain: calendar
-
-    calendar_gelb:
-      name: Gelber-Sack-Kalender
-      description: WCS-Kalender für Verpackungen / Gelben Sack
-      selector:
-        entity:
-          domain: calendar
-
-    publish_time:
-      name: Tägliche Aktualisierung
+    all_calendar:
+      name: Alle-Müllarten-Kalender
       description: >
-        Zu dieser Uhrzeit werden alle vier Werte erneut per MQTT veröffentlicht.
-      default: "06:00:00"
+        WCS-Kalender mit Biomüll, Papier und Verpackungen/Gelbem Sack.
       selector:
-        time: {}
+        entity:
+          filter:
+            - domain: calendar
+
+    update_time:
+      name: Tägliche Aktualisierung
+      description: Zu dieser Uhrzeit werden die vier Werte neu ermittelt.
+      default: "20:00:00"
+      selector:
+        time:
+
+mode: single
 
 variables:
-  calendar_rest: !input calendar_rest
-  calendar_bio: !input calendar_bio
-  calendar_papier: !input calendar_papier
-  calendar_gelb: !input calendar_gelb
+  rest_calendar: !input rest_calendar
+  all_calendar: !input all_calendar
 
-trigger:
-  - platform: state
-    entity_id: !input calendar_rest
+triggers:
+  - trigger: time
+    at: !input update_time
 
-  - platform: state
-    entity_id: !input calendar_bio
+actions:
 
-  - platform: state
-    entity_id: !input calendar_papier
+  # ============================================================
+  # Alle kommenden Termine aus beiden WCS-Kalendern holen
+  # ============================================================
 
-  - platform: state
-    entity_id: !input calendar_gelb
-
-  - platform: time
-    at: !input publish_time
-
-  - platform: homeassistant
-    event: start
-
-action:
-  - service: mqtt.publish
+  - action: calendar.get_events
+    target:
+      entity_id:
+        - !input rest_calendar
+        - !input all_calendar
     data:
-      topic: muell/rest
-      payload: >
-        {% set start = state_attr(calendar_rest, 'start_time') %}
-        {% if start %}
-          {{ (as_datetime(start).date() - now().date()).days }}
-        {% else %}
-          0
-        {% endif %}
-      qos: 1
-      retain: true
+      start_date_time: "{{ today_at('00:00:00') }}"
+      duration:
+        days: 366
+    response_variable: wcs_events
 
-  - service: mqtt.publish
-    data:
-      topic: muell/bio
-      payload: >
-        {% set start = state_attr(calendar_bio, 'start_time') %}
-        {% if start %}
-          {{ (as_datetime(start).date() - now().date()).days }}
-        {% else %}
-          0
-        {% endif %}
-      qos: 1
-      retain: true
+  # ============================================================
+  # Nächste Termine je Müllart bestimmen
+  # ============================================================
 
-  - service: mqtt.publish
-    data:
-      topic: muell/papier
-      payload: >
-        {% set start = state_attr(calendar_papier, 'start_time') %}
-        {% if start %}
-          {{ (as_datetime(start).date() - now().date()).days }}
-        {% else %}
-          0
-        {% endif %}
-      qos: 1
-      retain: true
+  - variables:
 
-  - service: mqtt.publish
-    data:
-      topic: muell/gelb
-      payload: >
-        {% set start = state_attr(calendar_gelb, 'start_time') %}
-        {% if start %}
-          {{ (as_datetime(start).date() - now().date()).days }}
-        {% else %}
-          0
-        {% endif %}
-      qos: 1
-      retain: true
+      rest_days: >
+        {% set events = wcs_events[rest_calendar]['events'] | default([]) %}
+        {% set ns = namespace(best=none) %}
 
-mode: restart
+        {% for event in events %}
+          {% set d = as_datetime(event.start).date() %}
+
+          {% if ns.best is none or d < ns.best %}
+            {% set ns.best = d %}
+          {% endif %}
+        {% endfor %}
+
+        {% if ns.best is not none %}
+          {{ (ns.best - now().date()).days }}
+        {% else %}
+          {{ none }}
+        {% endif %}
+
+      bio_days: >
+        {% set events = wcs_events[all_calendar]['events'] | default([]) %}
+        {% set ns = namespace(best=none) %}
+
+        {% for event in events %}
+          {% set text = event.summary | default('') | lower %}
+          {% set d = as_datetime(event.start).date() %}
+
+          {% if 'bio' in text %}
+            {% if ns.best is none or d < ns.best %}
+              {% set ns.best = d %}
+            {% endif %}
+          {% endif %}
+        {% endfor %}
+
+        {% if ns.best is not none %}
+          {{ (ns.best - now().date()).days }}
+        {% else %}
+          {{ none }}
+        {% endif %}
+
+      papier_days: >
+        {% set events = wcs_events[all_calendar]['events'] | default([]) %}
+        {% set ns = namespace(best=none) %}
+
+        {% for event in events %}
+          {% set text = event.summary | default('') | lower %}
+          {% set d = as_datetime(event.start).date() %}
+
+          {% if 'papier' in text %}
+            {% if ns.best is none or d < ns.best %}
+              {% set ns.best = d %}
+            {% endif %}
+          {% endif %}
+        {% endfor %}
+
+        {% if ns.best is not none %}
+          {{ (ns.best - now().date()).days }}
+        {% else %}
+          {{ none }}
+        {% endif %}
+
+      gelb_days: >
+        {% set events = wcs_events[all_calendar]['events'] | default([]) %}
+        {% set ns = namespace(best=none) %}
+
+        {% for event in events %}
+          {% set text = event.summary | default('') | lower %}
+          {% set d = as_datetime(event.start).date() %}
+
+          {% if 'verpack' in text or 'gelb' in text %}
+            {% if ns.best is none or d < ns.best %}
+              {% set ns.best = d %}
+            {% endif %}
+          {% endif %}
+        {% endfor %}
+
+        {% if ns.best is not none %}
+          {{ (ns.best - now().date()).days }}
+        {% else %}
+          {{ none }}
+        {% endif %}
+
+  # ============================================================
+  # MQTT: Restmüll
+  # ============================================================
+
+  - if:
+      - condition: template
+        value_template: "{{ rest_days is not none }}"
+    then:
+      - action: mqtt.publish
+        data:
+          topic: "muell/rest"
+          payload: "{{ rest_days | int }}"
+
+  # ============================================================
+  # MQTT: Biomüll
+  # ============================================================
+
+  - if:
+      - condition: template
+        value_template: "{{ bio_days is not none }}"
+    then:
+      - action: mqtt.publish
+        data:
+          topic: "muell/bio"
+          payload: "{{ bio_days | int }}"
+
+  # ============================================================
+  # MQTT: Papier
+  # ============================================================
+
+  - if:
+      - condition: template
+        value_template: "{{ papier_days is not none }}"
+    then:
+      - action: mqtt.publish
+        data:
+          topic: "muell/papier"
+          payload: "{{ papier_days | int }}"
+
+  # ============================================================
+  # MQTT: Gelber Sack / Verpackungen
+  # ============================================================
+
+  - if:
+      - condition: template
+        value_template: "{{ gelb_days is not none }}"
+    then:
+      - action: mqtt.publish
+        data:
+          topic: "muell/gelb"
+          payload: "{{ gelb_days | int }}"
