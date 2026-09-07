@@ -1,32 +1,51 @@
 blueprint:
-  name: "Müll-Reminder – MQTT Publish (WCS Kalender)"
+  name: Müll-Reminder – MQTT Publish (WCS Kalender)
   description: >
-    Ermittelt die nächsten Abholtage aus zwei Waste-Collection-Schedule-
-    Kalendern und veröffentlicht sie per MQTT.
-    
-    Restmüll wird aus dem separaten Restmüll-Kalender gelesen.
-    Biomüll, Papier und Verpackungen werden aus dem gemeinsamen
-    "Alle"-Kalender anhand des Veranstaltungstitels herausgefiltert.
-    
-    Es werden keine zusätzlichen Template-Sensoren und kein days_to-
-    Attribut benötigt.
+    Ermittelt die nächsten Abholtage für Restmüll, Biomüll, Papier und
+    Gelben Sack aus frei wählbaren Waste-Collection-Schedule-Kalendern
+    und veröffentlicht die Anzahl der Tage bis zur nächsten Abholung
+    per MQTT. Ein Kalender kann für mehrere Müllarten verwendet werden.
   domain: automation
-  author: "NeMPS"
+  homeassistant:
+    min_version: "2024.6.0"
 
   input:
 
     rest_calendar:
       name: Restmüll-Kalender
-      description: WCS-Kalender, der ausschließlich Restmüll enthält.
+      description: >
+        WCS-Kalender für Restmüll. Darf auch ein gemeinsamer
+        Kalender mit mehreren Müllarten sein.
       selector:
         entity:
           filter:
             - domain: calendar
 
-    all_calendar:
-      name: Alle-Müllarten-Kalender
+    bio_calendar:
+      name: Biomüll-Kalender
       description: >
-        WCS-Kalender mit Biomüll, Papier und Verpackungen/Gelbem Sack.
+        WCS-Kalender für Biomüll. Darf auch ein gemeinsamer
+        Kalender mit mehreren Müllarten sein.
+      selector:
+        entity:
+          filter:
+            - domain: calendar
+
+    paper_calendar:
+      name: Papier-Kalender
+      description: >
+        WCS-Kalender für Papier. Darf auch ein gemeinsamer
+        Kalender mit mehreren Müllarten sein.
+      selector:
+        entity:
+          filter:
+            - domain: calendar
+
+    yellow_calendar:
+      name: Gelber-Sack-Kalender
+      description: >
+        WCS-Kalender für Gelben Sack / Verpackungen. Darf auch
+        ein gemeinsamer Kalender mit mehreren Müllarten sein.
       selector:
         entity:
           filter:
@@ -34,16 +53,10 @@ blueprint:
 
     update_time:
       name: Tägliche Aktualisierung
-      description: Zu dieser Uhrzeit werden die vier Werte neu ermittelt.
+      description: Uhrzeit, zu der die vier Werte neu ermittelt und per MQTT veröffentlicht werden.
       default: "20:00:00"
       selector:
         time:
-
-mode: single
-
-variables:
-  rest_calendar: !input rest_calendar
-  all_calendar: !input all_calendar
 
 triggers:
   - trigger: time
@@ -51,156 +64,165 @@ triggers:
 
 actions:
 
-  # ============================================================
-  # Alle kommenden Termine aus beiden WCS-Kalendern holen
-  # ============================================================
-
+  # Alle vier Kalender abfragen.
+  # Mehrfach ausgewählte Kalender werden von Home Assistant
+  # nur einmal zurückgeliefert.
   - action: calendar.get_events
     target:
       entity_id:
         - !input rest_calendar
-        - !input all_calendar
+        - !input bio_calendar
+        - !input paper_calendar
+        - !input yellow_calendar
     data:
-      start_date_time: "{{ today_at('00:00:00') }}"
+      start_date_time: "{{ today_at() }}"
       duration:
-        days: 366
+        days: 370
     response_variable: wcs_events
 
-  # ============================================================
-  # Nächste Termine je Müllart bestimmen
-  # ============================================================
-
+  # RESTMÜLL
   - variables:
+      rest_days: >-
+        {% set ns = namespace(events=[]) %}
 
-      rest_days: >
-        {% set events = wcs_events[rest_calendar]['events'] | default([]) %}
-        {% set ns = namespace(best=none) %}
+        {% for calendar in wcs_events.values() %}
+          {% for event in calendar.events %}
+            {% set summary = event.summary | default('') | lower %}
 
-        {% for event in events %}
-          {% set d = as_datetime(event.start).date() %}
-
-          {% if ns.best is none or d < ns.best %}
-            {% set ns.best = d %}
-          {% endif %}
-        {% endfor %}
-
-        {% if ns.best is not none %}
-          {{ (ns.best - now().date()).days }}
-        {% else %}
-          {{ none }}
-        {% endif %}
-
-      bio_days: >
-        {% set events = wcs_events[all_calendar]['events'] | default([]) %}
-        {% set ns = namespace(best=none) %}
-
-        {% for event in events %}
-          {% set text = event.summary | default('') | lower %}
-          {% set d = as_datetime(event.start).date() %}
-
-          {% if 'bio' in text %}
-            {% if ns.best is none or d < ns.best %}
-              {% set ns.best = d %}
+            {% if
+              'restmüll' in summary
+              or 'restmuell' in summary
+              or 'restabfall' in summary
+            %}
+              {% set ns.events = ns.events + [event] %}
             {% endif %}
-          {% endif %}
+          {% endfor %}
         {% endfor %}
 
-        {% if ns.best is not none %}
-          {{ (ns.best - now().date()).days }}
+        {% set events = ns.events
+          | sort(attribute='start')
+          | list %}
+
+        {% if events | length > 0 %}
+          {% set date = as_datetime(events[0].start) | as_local | as_datetime %}
+          {{ (date.date() - now().date()).days }}
         {% else %}
-          {{ none }}
+          0
         {% endif %}
 
-      papier_days: >
-        {% set events = wcs_events[all_calendar]['events'] | default([]) %}
-        {% set ns = namespace(best=none) %}
+  # BIOMÜLL
+  - variables:
+      bio_days: >-
+        {% set ns = namespace(events=[]) %}
 
-        {% for event in events %}
-          {% set text = event.summary | default('') | lower %}
-          {% set d = as_datetime(event.start).date() %}
+        {% for calendar in wcs_events.values() %}
+          {% for event in calendar.events %}
+            {% set summary = event.summary | default('') | lower %}
 
-          {% if 'papier' in text %}
-            {% if ns.best is none or d < ns.best %}
-              {% set ns.best = d %}
+            {% if
+              'biomüll' in summary
+              or 'biomuell' in summary
+              or 'biotonne' in summary
+            %}
+              {% set ns.events = ns.events + [event] %}
             {% endif %}
-          {% endif %}
+          {% endfor %}
         {% endfor %}
 
-        {% if ns.best is not none %}
-          {{ (ns.best - now().date()).days }}
+        {% set events = ns.events
+          | sort(attribute='start')
+          | list %}
+
+        {% if events | length > 0 %}
+          {% set date = as_datetime(events[0].start) | as_local | as_datetime %}
+          {{ (date.date() - now().date()).days }}
         {% else %}
-          {{ none }}
+          0
         {% endif %}
 
-      gelb_days: >
-        {% set events = wcs_events[all_calendar]['events'] | default([]) %}
-        {% set ns = namespace(best=none) %}
+  # PAPIER
+  - variables:
+      paper_days: >-
+        {% set ns = namespace(events=[]) %}
 
-        {% for event in events %}
-          {% set text = event.summary | default('') | lower %}
-          {% set d = as_datetime(event.start).date() %}
+        {% for calendar in wcs_events.values() %}
+          {% for event in calendar.events %}
+            {% set summary = event.summary | default('') | lower %}
 
-          {% if 'verpack' in text or 'gelb' in text %}
-            {% if ns.best is none or d < ns.best %}
-              {% set ns.best = d %}
+            {% if
+              'papier' in summary
+              or 'papiertonne' in summary
+              or 'altpapier' in summary
+            %}
+              {% set ns.events = ns.events + [event] %}
             {% endif %}
-          {% endif %}
+          {% endfor %}
         {% endfor %}
 
-        {% if ns.best is not none %}
-          {{ (ns.best - now().date()).days }}
+        {% set events = ns.events
+          | sort(attribute='start')
+          | list %}
+
+        {% if events | length > 0 %}
+          {% set date = as_datetime(events[0].start) | as_local | as_datetime %}
+          {{ (date.date() - now().date()).days }}
         {% else %}
-          {{ none }}
+          0
         {% endif %}
 
-  # ============================================================
-  # MQTT: Restmüll
-  # ============================================================
+  # GELBER SACK / VERPACKUNGEN
+  - variables:
+      yellow_days: >-
+        {% set ns = namespace(events=[]) %}
 
-  - if:
-      - condition: template
-        value_template: "{{ rest_days is not none }}"
-    then:
-      - action: mqtt.publish
-        data:
-          topic: "muell/rest"
-          payload: "{{ rest_days | int }}"
+        {% for calendar in wcs_events.values() %}
+          {% for event in calendar.events %}
+            {% set summary = event.summary | default('') | lower %}
 
-  # ============================================================
-  # MQTT: Biomüll
-  # ============================================================
+            {% if
+              'gelb' in summary
+              or 'verpack' in summary
+              or 'wertstoff' in summary
+            %}
+              {% set ns.events = ns.events + [event] %}
+            {% endif %}
+          {% endfor %}
+        {% endfor %}
 
-  - if:
-      - condition: template
-        value_template: "{{ bio_days is not none }}"
-    then:
-      - action: mqtt.publish
-        data:
-          topic: "muell/bio"
-          payload: "{{ bio_days | int }}"
+        {% set events = ns.events
+          | sort(attribute='start')
+          | list %}
 
-  # ============================================================
-  # MQTT: Papier
-  # ============================================================
+        {% if events | length > 0 %}
+          {% set date = as_datetime(events[0].start) | as_local | as_datetime %}
+          {{ (date.date() - now().date()).days }}
+        {% else %}
+          0
+        {% endif %}
 
-  - if:
-      - condition: template
-        value_template: "{{ papier_days is not none }}"
-    then:
-      - action: mqtt.publish
-        data:
-          topic: "muell/papier"
-          payload: "{{ papier_days | int }}"
+  # MQTT
+  - action: mqtt.publish
+    data:
+      topic: muell/rest
+      payload: "{{ rest_days | int }}"
+      retain: true
 
-  # ============================================================
-  # MQTT: Gelber Sack / Verpackungen
-  # ============================================================
+  - action: mqtt.publish
+    data:
+      topic: muell/bio
+      payload: "{{ bio_days | int }}"
+      retain: true
 
-  - if:
-      - condition: template
-        value_template: "{{ gelb_days is not none }}"
-    then:
-      - action: mqtt.publish
-        data:
-          topic: "muell/gelb"
-          payload: "{{ gelb_days | int }}"
+  - action: mqtt.publish
+    data:
+      topic: muell/papier
+      payload: "{{ paper_days | int }}"
+      retain: true
+
+  - action: mqtt.publish
+    data:
+      topic: muell/gelb
+      payload: "{{ yellow_days | int }}"
+      retain: true
+
+mode: single
