@@ -1,122 +1,126 @@
 blueprint:
-  name: Müll-Reminder – MQTT Publish (WCS direkt)
+  name: Müll-Reminder – MQTT Publish (WCS Kalender direkt)
   description: >
-    Veröffentlicht die "Tage bis Abholung"-Werte direkt aus vier bestehenden
-    "Waste Collection Schedule"-Sensoren auf die MQTT-Topics des
-    Müll-Reminder-Geräts (muell/rest, muell/bio, muell/papier, muell/gelb).
-    Keine eigenen Tage-Sensoren nötig - liest das von WCS bereitgestellte
-    "daysTo"-Attribut direkt aus. Voraussetzung: Bei den WCS-Sensoren muss
-    die Option "add_days_to" aktiviert sein, sonst ist kein daysTo-Attribut
-    vorhanden. Fehlt das Attribut bei mindestens einem der vier Sensoren,
-    wird KEINE MQTT-Nachricht gesendet (alle vier oder keiner) und eine
-    persistente Benachrichtigung in Home Assistant erzeugt (wird bei
-    erneutem Auftreten aktualisiert statt vervielfacht, und automatisch
-    entfernt, sobald wieder alle vier Sensoren das Attribut liefern).
+    Veröffentlicht die Anzahl der Tage bis zur nächsten Abholung direkt aus
+    vier Waste-Collection-Schedule-Kalendern per MQTT.
+    Die Berechnung erfolgt anhand des start_time-Attributs des jeweiligen
+    WCS-Kalenders. Es werden keine zusätzlichen Template-Sensoren und kein
+    daysTo-Attribut benötigt.
   domain: automation
+
   input:
-    sensor_rest:
-      name: Restmüll-Sensor (Waste Collection Schedule)
-      description: Der rohe WCS-Sensor für Restmüll, kein eigener Tage-Sensor nötig.
+    calendar_rest:
+      name: Restmüll-Kalender
+      description: WCS-Kalender für Restmüll
       selector:
         entity:
-          domain: sensor
-    sensor_bio:
-      name: Biomüll-Sensor (Waste Collection Schedule)
+          domain: calendar
+
+    calendar_bio:
+      name: Biomüll-Kalender
+      description: WCS-Kalender für Biomüll
       selector:
         entity:
-          domain: sensor
-    sensor_papier:
-      name: Papier-Sensor (Waste Collection Schedule)
+          domain: calendar
+
+    calendar_papier:
+      name: Papier-Kalender
+      description: WCS-Kalender für Papier
       selector:
         entity:
-          domain: sensor
-    sensor_gelb:
-      name: Gelber-Sack-Sensor (Waste Collection Schedule)
+          domain: calendar
+
+    calendar_gelb:
+      name: Gelber-Sack-Kalender
+      description: WCS-Kalender für Verpackungen / Gelben Sack
       selector:
         entity:
-          domain: sensor
+          domain: calendar
+
     publish_time:
-      name: Tägliche Auffrisch-Uhrzeit
+      name: Tägliche Aktualisierung
       description: >
-        Zusätzlich zu jeder Sensoränderung wird täglich zu dieser Uhrzeit
-        erneut veröffentlicht - hält die MQTT-Werte frisch, falls der Broker
-        seine retained Nachrichten mal verliert (z. B. nach einem Neustart
-        ohne Persistenz).
+        Zu dieser Uhrzeit werden alle vier Werte erneut per MQTT veröffentlicht.
       default: "06:00:00"
       selector:
         time: {}
 
 variables:
-  sensor_rest: !input sensor_rest
-  sensor_bio: !input sensor_bio
-  sensor_papier: !input sensor_papier
-  sensor_gelb: !input sensor_gelb
+  calendar_rest: !input calendar_rest
+  calendar_bio: !input calendar_bio
+  calendar_papier: !input calendar_papier
+  calendar_gelb: !input calendar_gelb
 
 trigger:
   - platform: state
-    entity_id: !input sensor_rest
+    entity_id: !input calendar_rest
+
   - platform: state
-    entity_id: !input sensor_bio
+    entity_id: !input calendar_bio
+
   - platform: state
-    entity_id: !input sensor_papier
+    entity_id: !input calendar_papier
+
   - platform: state
-    entity_id: !input sensor_gelb
+    entity_id: !input calendar_gelb
+
   - platform: time
     at: !input publish_time
+
   - platform: homeassistant
     event: start
 
 action:
-  - variables:
-      missing_days_to: >
-        {{ [
-          sensor_rest if state_attr(sensor_rest, 'daysTo') is none else none,
-          sensor_bio if state_attr(sensor_bio, 'daysTo') is none else none,
-          sensor_papier if state_attr(sensor_papier, 'daysTo') is none else none,
-          sensor_gelb if state_attr(sensor_gelb, 'daysTo') is none else none
-        ] | reject('equalto', none) | list }}
-
-  - if:
-      - condition: template
-        value_template: "{{ missing_days_to | count > 0 }}"
-    then:
-      - service: persistent_notification.create
-        data:
-          notification_id: "muell_reminder_daysto_missing"
-          title: "Müll-Reminder: WCS-Konfiguration prüfen"
-          message: >
-            Bei folgenden WCS-Sensoren fehlt das Attribut "daysTo":
-            {{ missing_days_to | join(', ') }}.
-            Bitte in Waste Collection Schedule die Option "add_days_to"
-            aktivieren. Die MQTT-Veröffentlichung wurde abgebrochen.
-      - stop: "MQTT-Veröffentlichung abgebrochen: daysTo fehlt."
-
-  - service: persistent_notification.dismiss
-    data:
-      notification_id: "muell_reminder_daysto_missing"
-
   - service: mqtt.publish
     data:
       topic: muell/rest
+      payload: >
+        {% set start = state_attr(calendar_rest, 'start_time') %}
+        {% if start %}
+          {{ (as_datetime(start).date() - now().date()).days }}
+        {% else %}
+          0
+        {% endif %}
+      qos: 1
       retain: true
-      payload: "{{ state_attr(sensor_rest, 'daysTo') }}"
 
   - service: mqtt.publish
     data:
       topic: muell/bio
+      payload: >
+        {% set start = state_attr(calendar_bio, 'start_time') %}
+        {% if start %}
+          {{ (as_datetime(start).date() - now().date()).days }}
+        {% else %}
+          0
+        {% endif %}
+      qos: 1
       retain: true
-      payload: "{{ state_attr(sensor_bio, 'daysTo') }}"
 
   - service: mqtt.publish
     data:
       topic: muell/papier
+      payload: >
+        {% set start = state_attr(calendar_papier, 'start_time') %}
+        {% if start %}
+          {{ (as_datetime(start).date() - now().date()).days }}
+        {% else %}
+          0
+        {% endif %}
+      qos: 1
       retain: true
-      payload: "{{ state_attr(sensor_papier, 'daysTo') }}"
 
   - service: mqtt.publish
     data:
       topic: muell/gelb
+      payload: >
+        {% set start = state_attr(calendar_gelb, 'start_time') %}
+        {% if start %}
+          {{ (as_datetime(start).date() - now().date()).days }}
+        {% else %}
+          0
+        {% endif %}
+      qos: 1
       retain: true
-      payload: "{{ state_attr(sensor_gelb, 'daysTo') }}"
 
-mode: single
+mode: restart
