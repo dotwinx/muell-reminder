@@ -1,56 +1,50 @@
 blueprint:
-  name: Müll-Reminder – MQTT Publish (WCS Sensoren)
+  name: Müll-Reminder – MQTT Publish (WCS, optional + retained)
   description: >
-    Veröffentlicht die Anzahl der Tage bis zur nächsten Müllabholung
-    direkt aus den ausgewählten Waste-Collection-Schedule-Sensoren per MQTT.
-    Jeder Sensor entspricht genau einem Mülltyp. Nicht benötigte Müllarten
-    können leer gelassen werden.
+    Veröffentlicht die Tage bis zur nächsten Abholung aus den ausgewählten
+    Waste-Collection-Schedule-Sensoren per MQTT (retained). Nicht benötigte
+    Müllarten können leer gelassen werden. Trigger bewusst nur Uhrzeit +
+    HA-Start (kein State-Trigger auf die Sensoren), da eine leere entity_id
+    bei optionalen Feldern die Automatisierungs-Validierung vermutlich
+    nicht besteht. Fehlt bei einem befüllten Sensor "daysTo" (add_days_to
+    nicht aktiviert), wird nur dieser Wert übersprungen + gemeldet - die
+    übrigen werden trotzdem veröffentlicht.
   domain: automation
-
   input:
-
     rest_sensor:
       name: Restmüll-Sensor
-      description: Sensor für Restmüll. Optional.
+      description: Optional - leer lassen, falls nicht benötigt.
       default: ""
       selector:
         entity:
           domain: sensor
-
     bio_sensor:
       name: Biomüll-Sensor
-      description: Sensor für Biomüll. Optional.
+      description: Optional - leer lassen, falls nicht benötigt.
       default: ""
       selector:
         entity:
           domain: sensor
-
     papier_sensor:
       name: Papier-Sensor
-      description: Sensor für Papier. Optional.
+      description: Optional - leer lassen, falls nicht benötigt.
       default: ""
       selector:
         entity:
           domain: sensor
-
     gelb_sensor:
       name: Verpackungs-/Gelber-Sack-Sensor
-      description: Sensor für Leichtverpackungen / Gelben Sack. Optional.
+      description: Optional - leer lassen, falls nicht benötigt.
       default: ""
       selector:
         entity:
           domain: sensor
-
     update_time:
       name: Tägliche Aktualisierung
-      description: Zu dieser Uhrzeit werden die ausgewählten Werte per MQTT veröffentlicht.
+      description: Zu dieser Uhrzeit werden die ausgewählten Werte per MQTT veröffentlicht (zusätzlich beim HA-Start).
       default: "20:00:00"
       selector:
         time: {}
-
-trigger:
-  - platform: time
-    at: !input update_time
 
 variables:
   rest_sensor: !input rest_sensor
@@ -58,42 +52,82 @@ variables:
   papier_sensor: !input papier_sensor
   gelb_sensor: !input gelb_sensor
 
-action:
+trigger:
+  - platform: time
+    at: !input update_time
+  - platform: homeassistant
+    event: start
 
+action:
+  # Pro befülltem Sensor prüfen, ob daysTo tatsächlich vorhanden ist -
+  # leere Slots werden dabei bewusst übersprungen (kein Fehler, Absicht).
+  - variables:
+      missing: >
+        {{ [
+          'Restmüll' if rest_sensor not in ['', none] and state_attr(rest_sensor, 'daysTo') is none else none,
+          'Biomüll' if bio_sensor not in ['', none] and state_attr(bio_sensor, 'daysTo') is none else none,
+          'Papier' if papier_sensor not in ['', none] and state_attr(papier_sensor, 'daysTo') is none else none,
+          'Gelber Sack' if gelb_sensor not in ['', none] and state_attr(gelb_sensor, 'daysTo') is none else none
+        ] | reject('equalto', none) | list }}
+
+  - choose:
+      - conditions:
+          - condition: template
+            value_template: "{{ missing | count > 0 }}"
+        sequence:
+          - service: persistent_notification.create
+            data:
+              notification_id: "muell_reminder_daysto_missing"
+              title: "Müll-Reminder: WCS-Konfiguration prüfen"
+              message: >
+                Bei folgenden Müllarten fehlt das Attribut "daysTo": {{ missing | join(', ') }}.
+                Bitte in Waste Collection Schedule "add_days_to" aktivieren. Diese Werte wurden nicht aktualisiert, andere schon.
+    default:
+      - service: persistent_notification.dismiss
+        data:
+          notification_id: "muell_reminder_daysto_missing"
+
+  # Jede Müllart einzeln, unabhängig von den anderen - retain:true, damit der
+  # ESP32 nach einem Neustart sofort den letzten bekannten Wert bekommt.
   - if:
       - condition: template
-        value_template: "{{ rest_sensor != '' }}"
+        value_template: "{{ rest_sensor not in ['', none] and state_attr(rest_sensor, 'daysTo') is not none }}"
     then:
       - service: mqtt.publish
         data:
           topic: muell/rest
+          retain: true
           payload: "{{ state_attr(rest_sensor, 'daysTo') | int }}"
 
   - if:
       - condition: template
-        value_template: "{{ bio_sensor != '' }}"
+        value_template: "{{ bio_sensor not in ['', none] and state_attr(bio_sensor, 'daysTo') is not none }}"
     then:
       - service: mqtt.publish
         data:
           topic: muell/bio
+          retain: true
           payload: "{{ state_attr(bio_sensor, 'daysTo') | int }}"
 
   - if:
       - condition: template
-        value_template: "{{ papier_sensor != '' }}"
+        value_template: "{{ papier_sensor not in ['', none] and state_attr(papier_sensor, 'daysTo') is not none }}"
     then:
       - service: mqtt.publish
         data:
           topic: muell/papier
+          retain: true
           payload: "{{ state_attr(papier_sensor, 'daysTo') | int }}"
 
   - if:
       - condition: template
-        value_template: "{{ gelb_sensor != '' }}"
+        value_template: "{{ gelb_sensor not in ['', none] and state_attr(gelb_sensor, 'daysTo') is not none }}"
     then:
       - service: mqtt.publish
         data:
           topic: muell/gelb
+          retain: true
           payload: "{{ state_attr(gelb_sensor, 'daysTo') | int }}"
 
 mode: single
+
